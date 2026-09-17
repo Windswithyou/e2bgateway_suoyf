@@ -50,6 +50,7 @@ func CreateSandboxHandler(registry *adapter.Registry, router *routing.Router, en
 			TemplateID: dtoReq.TemplateID,
 			Alias:      dtoReq.Alias,
 			Timeout:    dtoReq.Timeout,
+			Envs:       dtoReq.EnvVars,
 			Metadata:   dtoReq.Metadata,
 		}
 
