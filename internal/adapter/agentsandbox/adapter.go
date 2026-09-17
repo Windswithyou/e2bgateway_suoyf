@@ -36,6 +36,30 @@ import (
 	extv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
 )
 
+// envsToEnvVarList converts a map of environment variables to the CRD EnvVar
+// slice injected into SandboxClaim.Spec.Env at claim creation time.
+func envsToEnvVarList(envs map[string]string) []extv1beta1.EnvVar {
+	if len(envs) == 0 {
+		return nil
+	}
+	vars := make([]extv1beta1.EnvVar, 0, len(envs))
+	for k, v := range envs {
+		vars = append(vars, extv1beta1.EnvVar{Name: k, Value: v})
+	}
+	return vars
+}
+
+// optionsWithEnv derives per-request Options from the base options for
+// sandboxes created with environment variables. The base is copied, never
+// mutated (the adapter shares it across concurrent requests).
+func optionsWithEnv(base sandbox.Options, warmPool, namespace string, envs map[string]string) sandbox.Options {
+	opts := base
+	opts.WarmPoolName = warmPool
+	opts.Namespace = namespace
+	opts.Env = envsToEnvVarList(envs)
+	return opts
+}
+
 // Adapter implements adapter.SandboxAdapter using the official agent-sandbox client.
 type Adapter struct {
 	name      string
@@ -75,6 +99,10 @@ type Adapter struct {
 
 	// registry provides access to the sandbox→backend mapping.
 	registry *adapter.Registry
+
+	// baseOpts stores the client-level Options from construction. Per-request
+	// env injection derives a copy of these options when Envs are present.
+	baseOpts sandbox.Options
 }
 
 // sandboxEntry stores metadata for an active sandbox.
@@ -150,6 +178,7 @@ func New(cfg AdapterConfig) (*Adapter, error) {
 		envdClients:      make(map[string]*envd.Client),
 		useEnvdDataPlane: cfg.UseEnvdDataPlane,
 		registry:         cfg.Registry,
+		baseOpts:         opts,
 	}, nil
 }
 
@@ -168,9 +197,27 @@ func (a *Adapter) HealthCheck(ctx context.Context) error {
 func (a *Adapter) CreateSandbox(ctx context.Context, req *adapter.CreateSandboxRequest) (*adapter.Sandbox, error) {
 	warmPool := a.resolveWarmPool(req.TemplateID)
 
-	sb, err := a.client.CreateSandbox(ctx, warmPool, a.namespace)
-	if err != nil {
-		return nil, fmt.Errorf("creating sandbox: %w", err)
+	// When envs are requested, derive per-request options and create the
+	// SandboxClaim with Spec.Env so the container starts with the variables.
+	// NOTE: the SDK cold-starts the sandbox from the warm pool template in
+	// this case (the pre-warmed pod cannot be reused), which is slower.
+	// This is inherent SDK behavior, not a gateway regression.
+	var sb *sandbox.Sandbox
+	if len(req.Envs) > 0 {
+		handle, err := sandbox.New(ctx, optionsWithEnv(a.baseOpts, warmPool, a.namespace, req.Envs))
+		if err != nil {
+			return nil, fmt.Errorf("creating sandbox with envs: %w", err)
+		}
+		if err := handle.Open(ctx); err != nil {
+			return nil, fmt.Errorf("opening sandbox with envs: %w", err)
+		}
+		sb = handle
+	} else {
+		var err error
+		sb, err = a.client.CreateSandbox(ctx, warmPool, a.namespace)
+		if err != nil {
+			return nil, fmt.Errorf("creating sandbox: %w", err)
+		}
 	}
 
 	e2bID := generateE2BID()
