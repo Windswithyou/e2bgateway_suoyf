@@ -73,6 +73,7 @@ func (a *Adapter) CreateSandbox(ctx context.Context, req *adapter.CreateSandboxR
 		TemplateID: req.TemplateID,
 		Alias:      req.Alias,
 		Timeout:    req.Timeout,
+		EnvVars:    req.Envs,
 		Metadata:   req.Metadata,
 	}
 
