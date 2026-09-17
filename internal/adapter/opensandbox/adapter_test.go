@@ -1322,9 +1322,57 @@ func TestGetPortURL_TracksPort(t *testing.T) {
 	}
 }
 
+// TestCreateSandbox_WithEnvs tests that CreateSandbox passes request envs into
+// the SDK create request for create-time injection.
+func TestCreateSandbox_WithEnvs(t *testing.T) {
+	fakeLifecycle := &fakeLifecycleClient{}
+	a := &Adapter{
+		name:        "test",
+		lifecycle:   fakeLifecycle,
+		portTracker: make(map[string]map[int]bool),
+	}
+
+	_, err := a.CreateSandbox(context.Background(), &adapter.CreateSandboxRequest{
+		TemplateID: "img",
+		Envs:       map[string]string{"FOO": "bar", "BAZ": "qux"},
+	})
+	if err != nil {
+		t.Fatalf("CreateSandbox() error: %v", err)
+	}
+
+	if len(fakeLifecycle.createRequests) != 1 {
+		t.Fatalf("expected 1 create request, got %d", len(fakeLifecycle.createRequests))
+	}
+	envs := fakeLifecycle.createRequests[0].Env
+	if envs["FOO"] != "bar" || envs["BAZ"] != "qux" {
+		t.Errorf("expected Env to carry request envs, got %+v", envs)
+	}
+}
+
+// TestCreateSandbox_NoEnvs_LeavesEnvNil tests that CreateSandbox leaves the
+// SDK Env empty when the request carries no envs.
+func TestCreateSandbox_NoEnvs_LeavesEnvNil(t *testing.T) {
+	fakeLifecycle := &fakeLifecycleClient{}
+	a := &Adapter{
+		name:        "test",
+		lifecycle:   fakeLifecycle,
+		portTracker: make(map[string]map[int]bool),
+	}
+
+	if _, err := a.CreateSandbox(context.Background(), &adapter.CreateSandboxRequest{TemplateID: "img"}); err != nil {
+		t.Fatalf("CreateSandbox() error: %v", err)
+	}
+
+	envs := fakeLifecycle.createRequests[0].Env
+	if len(envs) != 0 {
+		t.Errorf("expected nil/empty Env when request has none, got %+v", envs)
+	}
+}
+
 // fakeLifecycleClient is a mock lifecycle client for testing.
 type fakeLifecycleClient struct {
-	endpoints map[string]*opensandbox.Endpoint
+	endpoints      map[string]*opensandbox.Endpoint
+	createRequests []opensandbox.CreateSandboxRequest
 }
 
 func (f *fakeLifecycleClient) ListSandboxes(ctx context.Context, opts opensandbox.ListOptions) (*opensandbox.ListSandboxesResponse, error) {
@@ -1332,7 +1380,12 @@ func (f *fakeLifecycleClient) ListSandboxes(ctx context.Context, opts opensandbo
 }
 
 func (f *fakeLifecycleClient) CreateSandbox(ctx context.Context, req opensandbox.CreateSandboxRequest) (*opensandbox.SandboxInfo, error) {
-	return &opensandbox.SandboxInfo{}, nil
+	f.createRequests = append(f.createRequests, req)
+	return &opensandbox.SandboxInfo{
+		ID:        fmt.Sprintf("sandbox-%d", len(f.createRequests)),
+		Status:    opensandbox.SandboxStatus{State: opensandbox.StateRunning},
+		CreatedAt: time.Now(),
+	}, nil
 }
 
 func (f *fakeLifecycleClient) GetSandbox(ctx context.Context, id string) (*opensandbox.SandboxInfo, error) {

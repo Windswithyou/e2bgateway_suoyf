@@ -255,6 +255,7 @@ func (a *Adapter) CreateSandbox(ctx context.Context, req *adapter.CreateSandboxR
 		Entrypoint:     opensandbox.DefaultEntrypoint,
 		ResourceLimits: opensandbox.DefaultResourceLimits,
 		Timeout:        &timeout,
+		Env:            req.Envs,
 		Metadata:       req.Metadata,
 	})
 	if err != nil {
