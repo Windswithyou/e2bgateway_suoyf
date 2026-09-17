@@ -927,3 +927,45 @@ func TestUploadFileHandler(t *testing.T) {
 		t.Errorf("expected status 204, got %d; body: %s", w.Code, w.Body.String())
 	}
 }
+
+func TestCreateSandboxHandler_EnvVarsPassthrough(t *testing.T) {
+	reg, r := setupTestRouter()
+
+	body := `{"templateID":"base","envVars":{"FOO":"bar","BAZ":"qux with space"}}`
+	req := httptest.NewRequest(http.MethodPost, "/sandboxes", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	v1.CreateSandboxHandler(reg, r, "e2b.example.com")(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var resp dto.SandboxCreateResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.SandboxID == "" {
+		t.Fatal("expected non-empty sandboxID")
+	}
+
+	ma, ok := reg.Get("mock")
+	if !ok {
+		t.Fatal("mock adapter not found in registry")
+	}
+	m, ok := ma.(*mockadapter.Adapter)
+	if !ok {
+		t.Fatal("registry backend is not a mock adapter")
+	}
+	envs, found := m.StoredEnvs(resp.SandboxID)
+	if !found {
+		t.Fatal("expected envs to be stored in mock adapter")
+	}
+	if envs["FOO"] != "bar" {
+		t.Errorf("FOO = %q, want %q", envs["FOO"], "bar")
+	}
+	if envs["BAZ"] != "qux with space" {
+		t.Errorf("BAZ = %q, want %q", envs["BAZ"], "qux with space")
+	}
+}
