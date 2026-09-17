@@ -24,6 +24,13 @@ import (
 	"github.com/e2bgateway/e2bgateway/internal/cache"
 )
 
+// shellQuote safely quotes a string for use in shell commands.
+// It wraps the string in single quotes and escapes any embedded single quotes.
+func shellQuote(s string) string {
+	// Replace ' with '\'' (end quote, escaped quote, start quote)
+	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
+}
+
 const defaultLanguage = "python"
 
 // lifecycleClient is the subset of OpenSandbox LifecycleClient methods used
@@ -846,8 +853,56 @@ func (a *Adapter) ValidateAccessToken(_ context.Context, sandboxID, token string
 
 // --- Environment Variables ---
 
-func (a *Adapter) SetEnvs(_ context.Context, _ string, _ map[string]string) error {
-	return fmt.Errorf("set envs not supported by opensandbox backend")
+func (a *Adapter) SetEnvs(ctx context.Context, sandboxID string, envs map[string]string) error {
+	if len(envs) == 0 {
+		return nil
+	}
+
+	execClient, err := a.getOrCreateExecdClient(ctx, sandboxID)
+	if err != nil {
+		return err
+	}
+
+	// Write environment variables to /etc/environment for persistence.
+	// Each RunCommand spawns a new shell, so export does not persist; new
+	// shells pick the variables up from /etc/environment (cross-session).
+	// NOTE: no separate `export` step — it would only affect the throwaway
+	// shell this command runs in.
+	_, err = a.runCommandQuiet(ctx, execClient, buildSetEnvsCommand(envs))
+	return err
+}
+
+// runCommandQuiet executes a command via the execd client and discards output.
+func (a *Adapter) runCommandQuiet(ctx context.Context, execClient *opensandbox.ExecdClient, command string) (*adapter.CommandResult, error) {
+	var stdout, stderr strings.Builder
+	err := execClient.RunCommand(ctx, opensandbox.RunCommandRequest{
+		Command: command,
+		Timeout: 30000, // 30 seconds
+	}, func(event opensandbox.StreamEvent) error {
+		switch event.Event {
+		case "stdout":
+			stdout.WriteString(extractText(event.Data))
+		case "stderr":
+			stderr.WriteString(extractText(event.Data))
+		}
+		return nil
+	})
+	if err != nil {
+		return &adapter.CommandResult{Stdout: stdout.String(), Stderr: stderr.String(), ExitCode: 1}, err
+	}
+	return &adapter.CommandResult{Stdout: stdout.String(), Stderr: stderr.String(), ExitCode: 0}, nil
+}
+
+// buildSetEnvsCommand builds the shell command that appends env vars to
+// /etc/environment. Keys are formatted as KEY="value"; the whole content is
+// shell-quoted to prevent injection.
+func buildSetEnvsCommand(envs map[string]string) string {
+	var envLines []string
+	for k, v := range envs {
+		envLines = append(envLines, fmt.Sprintf("%s=%q", k, v))
+	}
+	content := strings.Join(envLines, "\n") + "\n"
+	return fmt.Sprintf("echo %s >> /etc/environment", shellQuote(content))
 }
 
 // --- Logs ---

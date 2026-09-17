@@ -1110,9 +1110,6 @@ func TestUnsupportedOperations(t *testing.T) {
 	if _, err := a.GetPortURL(ctx, "x", 80); err == nil {
 		t.Error("GetPortURL expected error")
 	}
-	if err := a.SetEnvs(ctx, "x", nil); err == nil {
-		t.Error("SetEnvs expected error")
-	}
 	if _, err := a.CreateTag(ctx, "x", nil); err == nil {
 		t.Error("CreateTag expected error")
 	}
@@ -1418,4 +1415,73 @@ func (f *fakeLifecycleClient) GetEndpoint(ctx context.Context, sandboxID string,
 
 func (f *fakeLifecycleClient) GetSignedEndpoint(ctx context.Context, sandboxID string, port int, expires int64) (*opensandbox.Endpoint, error) {
 	return f.GetEndpoint(ctx, sandboxID, port, nil)
+}
+
+// ---------------------------------------------------------------------------
+// SetEnvs (runtime env vars via execd shell)
+// ---------------------------------------------------------------------------
+
+func TestShellQuote_OpenSandbox(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		{"plain", "abc", "'abc'"},
+		{"empty", "", "''"},
+		{"space", "a b", "'a b'"},
+		{"single quote", "it's", "'it'\\''s'"},
+		{"injection", "$(rm -rf /)", "'$(rm -rf /)'"},
+		{"semicolon", "a; rm -rf /", "'a; rm -rf /'"},
+		{"backtick", "`whoami`", "'`whoami`'"},
+		{"newline", "a\nb", "'a\nb'"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := shellQuote(tt.input); got != tt.expected {
+				t.Errorf("shellQuote(%q) = %q, want %q", tt.input, got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestBuildSetEnvsCommand(t *testing.T) {
+	cmd := buildSetEnvsCommand(map[string]string{"FOO": "bar"})
+	if !strings.Contains(cmd, "FOO=\"bar\"") {
+		t.Errorf("expected KEY=\"value\" format in %q", cmd)
+	}
+	if !strings.HasPrefix(cmd, "echo ") || !strings.Contains(cmd, "/etc/environment") {
+		t.Errorf("expected append-to-/etc/environment echo command, got %q", cmd)
+	}
+
+	// Value with shell metacharacters must be quoted: shellQuote wraps the
+	// whole content in single quotes so the value cannot break out.
+	cmd = buildSetEnvsCommand(map[string]string{"EVIL": "a; rm -rf /"})
+	if !strings.Contains(cmd, `'EVIL="a; rm -rf /"`) || !strings.HasSuffix(cmd, "' >> /etc/environment") {
+		t.Errorf("expected shellQuote around value, got %q", cmd)
+	}
+}
+
+func TestSetEnvs(t *testing.T) {
+	a, _, cleanup := newTestAdapter(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	s, err := a.CreateSandbox(ctx, &adapter.CreateSandboxRequest{TemplateID: "img"})
+	if err != nil {
+		t.Fatalf("CreateSandbox error: %v", err)
+	}
+
+	if err := a.SetEnvs(ctx, s.SandboxID, map[string]string{"FOO": "bar"}); err != nil {
+		t.Fatalf("SetEnvs error: %v", err)
+	}
+}
+
+func TestSetEnvs_SandboxNotFound(t *testing.T) {
+	a, _, cleanup := newTestAdapter(t)
+	defer cleanup()
+
+	if err := a.SetEnvs(context.Background(), "missing-sbx", map[string]string{"FOO": "bar"}); err == nil {
+		t.Error("expected error for unknown sandbox")
+	}
 }
