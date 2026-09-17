@@ -3,6 +3,7 @@ package e2bcloud
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -363,5 +364,67 @@ func TestE2BCloudAdapter_MalformedJSON(t *testing.T) {
 	_, err := a.GetSandbox(context.Background(), "test-sbx-1")
 	if err == nil {
 		t.Fatal("expected error for malformed JSON response")
+	}
+}
+
+func TestE2BCloudAdapter_CreateSandbox_EnvVars(t *testing.T) {
+	var gotBody dto.SandboxCreateRequest
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/sandboxes" && r.Method == http.MethodPost {
+			body, _ := io.ReadAll(r.Body)
+			_ = json.Unmarshal(body, &gotBody)
+			json.NewEncoder(w).Encode(dto.SandboxCreateResponse{
+				SandboxID:  "test-sbx-env",
+				TemplateID: "base",
+				ClientID:   "c1",
+			})
+			return
+		}
+		// GET /sandboxes/{id} for full info fetch
+		json.NewEncoder(w).Encode(dto.SandboxInfo{
+			SandboxID:  "test-sbx-env",
+			TemplateID: "base",
+		})
+	}))
+	defer ts.Close()
+
+	client := NewClient(ClientConfig{Endpoint: ts.URL, APIKey: "test-key"})
+	a := NewAdapterWithClient("e2b-cloud", client)
+
+	_, err := a.CreateSandbox(context.Background(), &adapter.CreateSandboxRequest{
+		TemplateID: "base",
+		Envs:       map[string]string{"FOO": "bar"},
+	})
+	if err != nil {
+		t.Fatalf("CreateSandbox() error: %v", err)
+	}
+	if gotBody.EnvVars == nil || gotBody.EnvVars["FOO"] != "bar" {
+		t.Errorf("expected envVars passthrough, got %+v", gotBody.EnvVars)
+	}
+}
+
+func TestE2BCloudClient_SetEnvs(t *testing.T) {
+	var gotBody map[string]map[string]string
+	var gotPath, gotMethod string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotMethod = r.Method
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &gotBody)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer ts.Close()
+
+	client := NewClient(ClientConfig{Endpoint: ts.URL, APIKey: "test-key"})
+
+	err := client.SetEnvs(context.Background(), "sbx-1", map[string]string{"FOO": "bar"})
+	if err != nil {
+		t.Fatalf("SetEnvs() error: %v", err)
+	}
+	if gotPath != "/sandboxes/sbx-1/envs" || gotMethod != http.MethodPost {
+		t.Errorf("expected POST /sandboxes/sbx-1/envs, got %s %s", gotMethod, gotPath)
+	}
+	if gotBody["envs"]["FOO"] != "bar" {
+		t.Errorf("expected envs body {envs: {FOO: bar}}, got %+v", gotBody)
 	}
 }
