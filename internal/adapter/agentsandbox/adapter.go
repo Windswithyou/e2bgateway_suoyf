@@ -1160,7 +1160,7 @@ func (a *Adapter) setEnvsViaHandle(ctx context.Context, sandboxID string, envs m
 // variables to /etc/environment. Each line is formatted KEY="value" (quoted to
 // handle spaces/special chars) and the whole content is shell-quoted.
 func buildEtcEnvironmentCmd(envs map[string]string) string {
-	var envLines []string
+	envLines := make([]string, 0, len(envs))
 	for k, v := range envs {
 		envLines = append(envLines, fmt.Sprintf("%s=%q", k, v))
 	}
