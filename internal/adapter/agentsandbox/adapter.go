@@ -1103,7 +1103,37 @@ func (a *Adapter) ValidateAccessToken(_ context.Context, sandboxID, token string
 
 // --- Environment Variables ---
 
+// SetEnvs writes environment variables into the sandbox. It is part of the
+// envd data plane like the other data-plane operations: when useEnvdDataPlane
+// is true it executes via the envd ConnectRPC client, otherwise it falls back
+// to the agent-sandbox SDK runtime handle.
 func (a *Adapter) SetEnvs(ctx context.Context, sandboxID string, envs map[string]string) error {
+	if a.useEnvdDataPlane {
+		return a.setEnvsViaEnvd(ctx, sandboxID, envs)
+	}
+	return a.setEnvsViaHandle(ctx, sandboxID, envs)
+}
+
+// setEnvsViaEnvd appends the variables to /etc/environment using envd ConnectRPC.
+// Each envd command spawns a new process, so export does not persist between
+// commands — only the /etc/environment write is needed (matching the OpenSandbox
+// SetEnvs behavior).
+func (a *Adapter) setEnvsViaEnvd(ctx context.Context, sandboxID string, envs map[string]string) error {
+	envdClient, err := a.getOrCreateEnvdClient(ctx, sandboxID)
+	if err != nil {
+		return err
+	}
+
+	cmd := buildEtcEnvironmentCmd(envs)
+	if _, _, _, err := envdClient.RunCommand(ctx, cmd, "", nil); err != nil {
+		return fmt.Errorf("writing to /etc/environment: %w", err)
+	}
+	return nil
+}
+
+// setEnvsViaHandle writes environment variables using the agent-sandbox SDK
+// runtime handle (legacy path).
+func (a *Adapter) setEnvsViaHandle(ctx context.Context, sandboxID string, envs map[string]string) error {
 	handle, err := a.getHandle(ctx, sandboxID)
 	if err != nil {
 		return err
@@ -1111,29 +1141,31 @@ func (a *Adapter) SetEnvs(ctx context.Context, sandboxID string, envs map[string
 
 	// Write environment variables to /etc/environment for persistence
 	// Each Run() creates a new shell, so export doesn't persist
-	var envLines []string
-	for k, v := range envs {
-		// Format: KEY="value" (quoted to handle spaces/special chars)
-		envLines = append(envLines, fmt.Sprintf("%s=%q", k, v))
-	}
-
-	// Append to /etc/environment (create if not exists)
-	content := strings.Join(envLines, "\n") + "\n"
-	cmd := fmt.Sprintf("echo %s >> /etc/environment", util.ShellQuote(content))
-	_, err = handle.Run(ctx, cmd)
-	if err != nil {
+	cmd := buildEtcEnvironmentCmd(envs)
+	if _, err := handle.Run(ctx, cmd); err != nil {
 		return fmt.Errorf("writing to /etc/environment: %w", err)
 	}
 
 	// Also export in current shell for immediate use
 	for k, v := range envs {
-		_, err := handle.Run(ctx, fmt.Sprintf("export %s=%s", k, util.ShellQuote(v)))
-		if err != nil {
+		if _, err := handle.Run(ctx, fmt.Sprintf("export %s=%s", k, util.ShellQuote(v))); err != nil {
 			return err
 		}
 	}
 
 	return nil
+}
+
+// buildEtcEnvironmentCmd builds the shell command that appends environment
+// variables to /etc/environment. Each line is formatted KEY="value" (quoted to
+// handle spaces/special chars) and the whole content is shell-quoted.
+func buildEtcEnvironmentCmd(envs map[string]string) string {
+	var envLines []string
+	for k, v := range envs {
+		envLines = append(envLines, fmt.Sprintf("%s=%q", k, v))
+	}
+	content := strings.Join(envLines, "\n") + "\n"
+	return fmt.Sprintf("echo %s >> /etc/environment", util.ShellQuote(content))
 }
 
 // --- Logs ---
